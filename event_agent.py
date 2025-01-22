@@ -17,14 +17,13 @@ API_KEY = os.getenv("TICKETMASTER_API_KEY")
 if not API_KEY:
     raise ValueError("API Key not found. Please set TICKETMASTER_API_KEY in your .env file.")
 
-
 ############################################################
-# 1. Parse user input (location, date, preferences)
+# 1. Parse user input
 ############################################################
 def parse_user_input(user_input: str) -> Dict[str, str]:
     text_lower = user_input.lower()
 
-    # Regex: location
+    # Capture location
     location_pattern = (
         r"(?:in|at|near)\s+([a-zA-Z\s,]+?)"
         r"(?=\s+(?:this|next|tomorrow|today|happening|\d{4}|$)|\s*$)"
@@ -32,7 +31,7 @@ def parse_user_input(user_input: str) -> Dict[str, str]:
     location_match = re.search(location_pattern, text_lower)
     location = location_match.group(1).strip() if location_match else None
 
-    # Regex: date
+    # Capture date references
     date_pattern = (
         r"(this\s+(?:weekend|week)|next\s+(?:weekend|week)|tomorrow|today|"
         r"\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})"
@@ -57,7 +56,6 @@ def parse_user_input(user_input: str) -> Dict[str, str]:
         elif "next week" in date_str:
             parsed_date = (today + timedelta(days=7)).strftime("%Y-%m-%d")
         else:
-            # Direct date format
             try:
                 if "-" in date_str:
                     dt = datetime.strptime(date_str, "%Y-%m-%d")
@@ -66,9 +64,9 @@ def parse_user_input(user_input: str) -> Dict[str, str]:
                     dt = datetime.strptime(date_str, "%d/%m/%Y")
                     parsed_date = dt.strftime("%Y-%m-%d")
             except ValueError:
-                print(f"Warning: Could not parse date format '{date_str}'.")
+                print(f"Warning: Could not parse date '{date_str}'.")
 
-    # Preferences (music, sports, theatre, etc.)
+    # Preferences
     preference_keywords = {
         "music": "Music",
         "concert": "Music",
@@ -93,9 +91,8 @@ def parse_user_input(user_input: str) -> Dict[str, str]:
         "preferences": found_preference
     }
 
-
 ############################################################
-# 2. Weather Tool: open_meteo_weather (Agent calls this)
+# 2. Weather Tool (Agent calls this)
 ############################################################
 @tools.tool
 def open_meteo_weather(latitude: float, longitude: float, date: str) -> str:
@@ -139,14 +136,13 @@ def open_meteo_weather(latitude: float, longitude: float, date: str) -> str:
     except requests.exceptions.RequestException as e:
         return json.dumps({"error": str(e)})
 
-
 ############################################################
-# 3. Ticketmaster Event Search (No Direct Weather Calls)
+# 3. Ticketmaster Event Search
 ############################################################
 def search_events(location: str, date: str | None = None, preferences: str | None = None) -> str:
     """
     Search for events using Ticketmaster API and return JSON string.
-    This function does NOT call the weather tool. The agent will handle weather.
+    This function does NOT call the weather tool. The agent will handle weather calls.
     """
     base_url = "https://app.ticketmaster.com/discovery/v2/events.json"
 
@@ -203,7 +199,6 @@ def search_events(location: str, date: str | None = None, preferences: str | Non
             lat = venue.get('location', {}).get('latitude', None)
             lng = venue.get('location', {}).get('longitude', None)
 
-            # No weather calls here:
             formatted_event = {
                 "name": event_name,
                 "date": local_date,
@@ -226,7 +221,6 @@ def search_events(location: str, date: str | None = None, preferences: str | Non
         print(f"Error fetching events: {str(e)}")
         return json.dumps([])
 
-
 @tools.tool
 def ticketmaster_event_search(location: str, date: str | None = None, preferences: str | None = None) -> str:
     """
@@ -238,48 +232,64 @@ def ticketmaster_event_search(location: str, date: str | None = None, preference
         print(f"Error in ticketmaster_event_search: {str(e)}")
         return json.dumps([])
 
-
 ############################################################
-# 4. Agent Setup
+# 4. Agent Setup (Enhanced)
 ############################################################
 llm = LLM(
     model="openai/gpt-4",
     temperature=0.7
 )
 
-# The agent can call either tool if it wants weather or events
 event_planner = Agent(
     role="Event Planner",
-    goal="Find and recommend top events, optionally retrieving weather data via open_meteo_weather.",
-    backstory="""You are an event planner who can also call open_meteo_weather to retrieve weather info when needed.""",
+    goal="Retrieve events, fetch weather data for each event, and make 2 final suggestions along with their reasons.",
+    backstory=(
+        "You are an event planner. For each user query, you:\n"
+        "1) Use 'ticketmaster_event_search' to fetch events.\n"
+        "2) For each event's date/lat/long, call 'open_meteo_weather' if date is not TBA.\n"
+        "3) Return ALL events and their weather data.\n"
+        "4) Then suggest TWO events to attend, based on weather and event type.\n"
+        "Don't summarize just one or two events. Return them all, then pick your top 2 and state your reason in short.\n"
+    ),
     tools=[ticketmaster_event_search, open_meteo_weather],
     llm=llm,
     verbose=True
 )
 
-
 def create_event_search_task(location: str, date: str | None = None, preferences: str | None = None) -> Task:
     description = f"""
-        Find the top events in {location}
-        Date: {date if date else 'Any date'}
-        Preferences: {preferences if preferences else 'Any type'}
-
-        1. Use 'ticketmaster_event_search' to fetch events.
-        2. For each event, if needed, call 'open_meteo_weather' to retrieve weather by lat/lng + date.
-        3. Provide a final summary (text or JSON).
+        The user wants events in {location} on {date if date else 'any date'} 
+        with preferences {preferences if preferences else 'any type'}.
+        Step-by-step:
+        1. Call 'ticketmaster_event_search' to get up to 10 events.
+        2. For each event, if 'date' is not TBA, call 'open_meteo_weather' 
+           with the event's latitude, longitude, and date.
+        3. Output ALL events with integrated weather info.
+        4. Finally, based on the forecast and event type, provide TWO recommended events 
+           for the user. 
+        5. Format your final answer with all events, then the 2 suggestions.
     """
+
     return Task(
         description=description,
-        expected_output="A final answer about the events, possibly including weather info.",
+        expected_output=(
+            "All events with weather, plus a final 'Suggestions' section listing two recommended events."
+        ),
         agent=event_planner
     )
-
 
 ############################################################
 # 5. Main find_events + CLI
 ############################################################
 def find_events(user_input: str):
-    # 1. Parse
+    """
+    1. Parse user input
+    2. Create a Task instructing the agent to:
+       - get all events
+       - fetch weather
+       - provide 2 final suggestions
+    3. Return the final agent output
+    """
     inputs = parse_user_input(user_input)
     location = inputs["location"]
     date = inputs["date"]
@@ -287,20 +297,15 @@ def find_events(user_input: str):
     if not location:
         return {"error": "Location is required. Please specify a city or location."}
 
-    # 2. Create Task
     task = create_event_search_task(location, date, preferences)
-
-    # 3. Kick off with Crew
     crew = Crew(agents=[event_planner], tasks=[task], verbose=True)
     result = crew.kickoff()  # returns a CrewOutput
-
-    # 4. If your library has something like 'result.raw' or 'result.to_dict()':
-    return result.raw
+    return result.raw  # typically a string
 
 
 if __name__ == "__main__":
-    print("\nWelcome to the Event Finder!")
-    print("Try something like: 'Find music events in New York tomorrow' or 'Show me sports events in Berlin next week'")
+    print("\nWelcome to the Enhanced Event Finder!")
+    print("Try something like: 'Find music events in New York tomorrow'")
 
     while True:
         try:
@@ -310,22 +315,21 @@ if __name__ == "__main__":
                 break
 
             response = find_events(user_input)
-
-            # 'response' might be a string. Attempt to parse JSON if possible:
             if isinstance(response, str):
                 try:
+                    # Attempt to parse if it's valid JSON
                     parsed = json.loads(response)
-                    print("\nSearch Results:")
+                    print("\nSearch Results (parsed JSON):")
                     print(json.dumps(parsed, indent=2))
                 except json.JSONDecodeError:
-                    # Not valid JSON, just print raw
+                    # Not valid JSON, print raw text
                     print("\nSearch Results (raw text):")
                     print(response)
             else:
-                # If it's already a dict or something else
-                print("\nSearch Results:")
+                # If it's already a dict, just pretty-print
+                print("\nSearch Results (dict):")
                 print(json.dumps(response, indent=2))
 
         except Exception as e:
             print(f"An error occurred: {str(e)}")
-            print("Please try again with a different query.")
+            print("Please try again.")
