@@ -183,7 +183,7 @@ def search_events(location: str, date: str | None = None, preferences: str | Non
             local_time = event['dates']['start'].get('localTime', 'TBA')
             status = event['dates']['status'].get('code', 'Unknown')
             ticket_url = event.get('url', 'Not available')
-
+            event_description = event.get('description', 'No event description')
             price_str = 'Price not available'
             if event.get('priceRanges'):
                 pr = event['priceRanges'][0]
@@ -203,6 +203,7 @@ def search_events(location: str, date: str | None = None, preferences: str | Non
                 "name": event_name,
                 "date": local_date,
                 "time": local_time,
+                "description": event_description,
                 "status": status,
                 "ticket_url": ticket_url,
                 "price_range": price_str,
